@@ -86,12 +86,12 @@ class Rest():
 
 class ServiceNow():
     def __init__(self):
-        self.total = 0
-        self.names = []
-        self.rest  = Rest()
-        self.ids   = []
-        self.all_nics = None
-        self.nic_map = {}
+        self.total      = 0
+        self.names      = []
+        self.rest       = Rest()
+        self.ids        = []
+        self.all_nics   = None
+        self.nic_map    = {}
 
         if BASE_URL.endswith('/'):
             self.base_url = BASE_URL
@@ -123,6 +123,7 @@ class ServiceNow():
             print '\n[!] Processing table "%s"' % (table)
         i = 0
         for data in response:
+            print '\n' + '-' * 80
             #print json.dumps(data, indent=4, sort_keys=True)
             mac_address = None
             ip_address  = None
@@ -130,6 +131,8 @@ class ServiceNow():
             macData     = {}
             nicData     = {}
             devData     = {}
+            macs        = []
+            ips         = []
 
             sys_id          = self.value(data, 'sys_id')
             name            = data['name']
@@ -161,27 +164,6 @@ class ServiceNow():
             else:
                 dev_type     = 'physical'
 
-            if DEBUG:
-                print '\n' + '-' * 50
-                print '%d devices left in table "%s"' % (self.total-i, table)
-                print '\n[!] Name: %s' % name
-                print '\tSys ID: %s' % sys_id
-                print '\tDomain: %s' % domain
-                print '\tFQDN: %s' % fqdn
-                print '\tSerial #: %s' % serial_no
-                print '\tAsset #: %s' % asset_no
-                print '\tOS: %s' % os
-                print '\tOS ver: %s' % os_ver
-                print '\tCPU count: %s' % cpu_count
-                print '\tCPU name: %s' % cpu_name
-                print '\tCPU Speed: %s MHz' % cpu_speed
-                print '\tCPU type: %s' % cpu_type
-                print '\tCPU core count: %s' % cpu_core_count
-
-                print '\tHDD size: %s Gb' % disk_space
-                print '\tRAM size: %s Mb' % ram
-                print '\tDevice type: %s' % dev_type
-
             devData.update({'name':name})
             if serial_no:
                 devData.update({'serial_no':serial_no})
@@ -201,40 +183,56 @@ class ServiceNow():
                 devData.update({'asset_no':asset_no})
             devData.update({'type':dev_type})
 
-
+            # upload device data
+            self.rest.post_device(devData)
 
             for k,v in self.nic_map.items():
                 if v == sys_id:
                     nic_sys_id = k
                     mac_address, ip_address, nic_name = self.get_ip_data(nic_sys_id)
-
                     if mac_address:
+                        macs.append(mac_address)
                         macData.update({'device':name})
                         if nic_name:
                             macData.update({'port_name':nic_name})
                         macData.update({'macaddress':mac_address})
-                        if DEBUG:
-                            print '\tMAC address: %s' % mac_address
-
+                        # upload mac address
+                        if macData:
+                            self.rest.post_mac(macData)
 
                     if ip_address:
+                        ips.append(ip_address)
                         nicData.update({'device':name})
                         if nic_name:
                             nicData.update({'tag':nic_name})
                         if mac_address:
                             nicData.update({'macaddress':mac_address})
                         nicData.update({'ipaddress':ip_address})
-                        if DEBUG:
-                            print '\tIP Address: %s' % ip_address
+                        # upload nic data
+                        if nicData:
+                            self.rest.post_ip(nicData)
 
-            # upload device data
-            self.rest.post_device(devData)
-            # upload mac address
-            if macData:
-                self.rest.post_mac(macData)
-            # upload nic data
-            if nicData:
-                self.rest.post_ip(nicData)
+            if DEBUG:
+                print '\n%d devices left in table "%s"' % (self.total-i, table)
+                print '\n[!] Name: %s' % name
+                print '\tSys ID: %s' % sys_id
+                print '\tDomain: %s' % domain
+                print '\tFQDN: %s' % fqdn
+                print '\tSerial #: %s' % serial_no
+                print '\tAsset #: %s' % asset_no
+                print '\tOS: %s' % os
+                print '\tOS ver: %s' % os_ver
+                print '\tCPU count: %s' % cpu_count
+                print '\tCPU name: %s' % cpu_name
+                print '\tCPU Speed: %s MHz' % cpu_speed
+                print '\tCPU type: %s' % cpu_type
+                print '\tCPU core count: %s' % cpu_core_count
+                print '\tHDD size: %s Gb' % disk_space
+                print '\tRAM size: %s Mb' % ram
+                print '\tDevice type: %s' % dev_type
+                print '\tIP Address[es]: %s' % ', '.join(ips)
+                print '\tMAC address[es]: %s' % ', '.join(macs)
+
             i+=1
 
     def get_ip_data(self, nic_sys_id):
@@ -255,6 +253,7 @@ class ServiceNow():
         response = requests.get(URL, auth=(USERNAME, PASSWORD), headers=HEADERS)
         self.all_nics = response.json()['result']
         for rec in self.all_nics:
+            #print json.dumps(rec, indent=4, sort_keys=True)
             if 'value' in rec['cmdb_ci']:
                 computer_sys_id = rec['cmdb_ci']['value']
                 nic_sys_id = rec['sys_id']
@@ -262,12 +261,41 @@ class ServiceNow():
 
 
 
+    def get_ips(self):
+        if DEBUG:
+            print '\n[!] Fetching IP addresses'
+        table = 'cmdb_ci_ip_address'
+        URL = self.base_url + table
+        response = requests.get(URL, auth=(USERNAME, PASSWORD), headers=HEADERS)
+
+        for rec in response.json()['result']:
+            ipData      = {}
+            ipaddress   = self.value(rec, 'ip_address')
+            macaddress  = self.value(rec, 'mac_address')
+            netmask     = self.value(rec, 'netmask')
+            if ipaddress:
+                ipData.update({'ipaddress':ipaddress})
+                if netmask:
+                    ipData.update({'netmask':netmask})
+                if macaddress:
+                    ipData.update({'macaddress':macaddress})
+                # upload ip address
+                self.rest.post_ip(ipData)
+                #print json.dumps(rec, indent=4, sort_keys=True)
+
+
+
+
+
+
 
 if __name__ == '__main__':
     snow = ServiceNow()
+    snow.get_ips()
     snow.get_adapters()
     for table in TABLES:
         snow.fetch_data(table)
+
 
     sys.exit()
 
