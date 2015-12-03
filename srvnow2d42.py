@@ -1,11 +1,19 @@
 #!/usr/bin/python
 
+"""
+GOTCHAS
+
+* In order for hardwares to be migrated, hardware must have unique name.
+
+
+"""
+
 import sys
-import os
-import json
+import re
 import base64
 import requests
 import sqlite3 as sql
+
 
 try:
     requests.packages.urllib3.disable_warnings()
@@ -14,7 +22,7 @@ except AttributeError:
 
 
 __copyright__   = "Copyright 2015, Device42 LLC"
-__version__     = "1.0.0"
+__version__     = "1.0.3"
 __status__      = "Testing"
 
 
@@ -29,11 +37,13 @@ PASSWORD    = 'P@ssw0rd'
 BASE_URL    = 'https://dev13344.service-now.com/api/now/table/'
 LIMIT       = 1000000
 HEADERS     = {"Content-Type":"application/json","Accept":"application/json"}
-TABLES      = ['cmdb_ci_server']#['cmdb_ci_computer_room']#'cmn_location']#, 'cmdb_ci_server']#, 'cmdb_ci_computer'] # ]#''cmdb_ci_datacenter',
+DEVICES     = ['cmdb_ci_server','cmdb_ci_app_server', 'cmdb_ci_database', 'cmdb_ci_email_server',
+               'cmdb_ci_ftp_server', 'cmdb_ci_directory_server', 'cmdb_ci_ip_server', 'cmdb_ci_computer']
 
 # ===== Other ===== #
-DEBUG       = True
-DRY_RUN     = False
+DEBUG        = True
+DRY_RUN      = False
+ZONE_AS_ROOM = False # for explanation take a look at get_zones() docstring
 
 
 
@@ -102,14 +112,40 @@ class Rest():
                 print msg
             self.uploader(data, url)
 
+    def post_rack(self, data):
+        if DRY_RUN == False:
+            url = self.base_url+'/api/1.0/racks/'
+            msg = '\t[+] Posting Rack data to %s ' % url
+            if self.debug:
+                print msg
+            self.uploader(data, url)
+
+    def post_hardware(self, data):
+        if DRY_RUN == False:
+            url = self.base_url+'/api/1.0/hardwares/'
+            msg = '\t[+] Posting Hardware data to %s ' % url
+            if self.debug:
+                print msg
+            self.uploader(data, url)
+
+    def mount_to_rack(self, data,device):
+        if DRY_RUN == False:
+            url = self.base_url+'/api/1.0/device/rack/'
+            msg = '\n\t[+] Mounting device "%s"to %s ' % (device, url)
+            if self.debug:
+                print msg
+            self.uploader(data, url)
+
 class ServiceNow():
     def __init__(self):
         self.total      = 0
         self.names      = []
         self.rest       = Rest()
-        self.location_map = {}
-        self.conn = None
-
+        self.location_map   = {}
+        self.conn           = None
+        self.datacenters    = {} # maps datacenter ID to datacenter name
+        self.rooms          = {} # maps room ID to room name
+        self.racks          = {} # maps rack ID to rack name
 
         if BASE_URL.endswith('/'):
             self.base_url = BASE_URL
@@ -141,140 +177,371 @@ class ServiceNow():
                         "netmask TEXT, "
                         "nic_sys_id TEXT)")
 
+            cur.execute("CREATE TABLE locations(id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                        "loc_sys_id TEXT UNIQUE, "
+                        "name TEXT, "
+                        "country TEXT, "
+                        "city TEXT, "
+                        "street TEXT)")
+
+            cur.execute("CREATE TABLE relationships(id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                        "parent TEXT, "
+                        "child TEXT)")
+
+            cur.execute("CREATE TABLE manufacturers(id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                        "name TEXT, "
+                        "sys_id TEXT UNIQUE )")
+
+            cur.execute("CREATE TABLE hardwares(id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                        "name TEXT, "
+                        "sys_id TEXT UNIQUE )")
+
+    def strip_html(self, raw):
+        if raw:
+            result = re.sub("<.*?>", "", raw)
+        else:
+            result = ''
+        return result
+
+
+    def query_db(self, query ,level=2):
+        if not self.conn:
+            self.connect()
+        with self.conn:
+            cur = self.conn.cursor()
+            cur.execute(query)
+            raw = cur.fetchall()
+            response = None
+            if level==0:
+                return raw
+            elif level==1:
+                try:
+                    response = raw[0]
+                except:
+                    pass
+            else:
+                try:
+                    response = raw[0][0]
+                except:
+                    pass
+        return response
+
+    def get_parent(self, sys_id):
+        try:
+            sql     = 'SELECT child FROM relationships WHERE parent="%s"' % sys_id
+            parent  = self.query_db(sql)
+        except:
+            parent  = None
+        return parent
 
     def fetch_data(self, table):
         URL = self.base_url + table + '?sysparm_limit=%s' % LIMIT
         response = requests.get(URL, auth=(USERNAME, PASSWORD), headers=HEADERS)
         if response.status_code == 200:
             response = response.json()
-            self.total = len(response['result'])
-            if table == 'cmdb_ci_datacenter':
-                self.process_datacenter_data(response['result'], table)
-            elif table == 'cmn_location':
-                self.process_buildings(response['result'], table)
-            elif table == 'cmdb_ci_computer_room':
-                self.process_buildings(response['result'], table)
-            elif table in ['cmdb_ci_server', 'cmdb_ci_computer']:
-                self.process_computer_data(response['result'], table)
-            else:
-                if DEBUG:
-                    print '\n[!] Unknown table: %s \n' % table
+            try:
+                return response['result']
+            except:
+                return None
+
 
     def value(self, data, word):
         try:
             val = data['%s' % word]
-            #print '\nVAL: ', val
             if val == '':
                 val = None
             return val
         except Exception as e:
             return None
 
-    def process_datacenter_data(self, response, table):
+
+    def get_locations(self):
+        table = 'cmn_location'
         if DEBUG:
             print '\n[!] Processing table "%s"' % (table)
-        i = 0
-        for data in response:
-            print '\n' + '-' * 80
-            #print json.dumps(data, indent=4, sort_keys=True)
+        response = self.fetch_data(table)
+        if response:
+            for data in response:
+                #print json.dumps(data, indent=4, sort_keys=True)
+                name        = data['name']
+                country     = data['country']
+                city        = data['city']
+                street      = data['street']
+                loc_sys_id  = data['sys_id']
+                if not self.conn:
+                    self.connect()
+                with self.conn:
+                    cur = self.conn.cursor()
+                    cur.execute("INSERT INTO locations VALUES (?,?,?,?,?,?)",
+                                (None, loc_sys_id,name,country,city,street))
 
-    def process_buildings(self, response, table):
+    def get_relationships(self):
+        table = 'cmdb_rel_ci'
         if DEBUG:
             print '\n[!] Processing table "%s"' % (table)
-        i = 1
-        for data in response:
-            print '\n[%d of %d ]' % (i, self.total) + '-' * 80
-            #print json.dumps(data, indent=4, sort_keys=True)
-            location    = {}
-            name        = self.value(data, 'name')
-            sys_id      = self.value(data, 'sys_id')
-            address     = self.value(data, 'street')
-            phone       = self.value(data, 'phone')
+        response = self.fetch_data(table)
 
-            self.location_map.update({sys_id:name})
-            location.update({'name':name})
-            location.update({'address':address})
-            location.update({'contact_phone':phone})
+        if response:
+            for rec in response:
+                child   = rec['child']['value']
+                parent  = rec['parent']['value']
 
-            self.rest.post_building(location)
-            i+=1
+                if not self.conn:
+                    self.connect()
+                with self.conn:
+                    cur = self.conn.cursor()
+                    cur.execute('INSERT INTO relationships VALUES (?,?,?)',(None,parent,child))
 
-    def process_rooms(self, response, table):
+    def get_manufacturers(self):
+        table = 'core_company'
         if DEBUG:
             print '\n[!] Processing table "%s"' % (table)
-        i = 1
-        for data in response:
-            print '\n[%d of %d ]' % (i, self.total) + '-' * 80
-            print json.dumps(data, indent=4, sort_keys=True)
+        response = self.fetch_data(table)
+        if response:
+            for rec in response:
+                #print json.dumps(data, indent=4, sort_keys=True)
+                sys_id = self.value(rec, 'sys_id')
+                name   = self.value(rec, 'name')
+                if not self.conn:
+                    self.connect()
+                with self.conn:
+                    cur = self.conn.cursor()
+                    cur.execute("INSERT INTO manufacturers VALUES (?,?,?)", (None, name, sys_id))
 
-    def process_computer_data(self, response, table):
+    def get_hardware(self):
+        table = 'cmdb_hardware_product_model'
         if DEBUG:
             print '\n[!] Processing table "%s"' % (table)
+        response = self.fetch_data(table)
+        if response:
+            for rec in response:
+                #print json.dumps(rec, indent=4, sort_keys=True)
+                hw_data     = {}
+                name        = self.value(rec, 'name')
+                sys_id      = self.value(rec, 'sys_id')
+                size        = self.value(rec, 'rack_units')
+                watts       = self.value(rec, 'power_consumption')
+                desc        = self.value(rec,'description')
+                description = self.strip_html(desc)
+                man_id      = self.value(self.value(rec, 'manufacturer'),'value')
+                if man_id:
+                    sql = 'SELECT name FROM manufacturers WHERE sys_id="%s"' % man_id
+                    manufacturer = self.query_db(sql)
+                    hw_data.update({'manufacturer':manufacturer})
+                hw_data.update({'name':name})
+                hw_data.update({'watts':watts})
+                hw_data.update({'notes':description})
+                hw_data.update({'size':size})
+                if not self.conn:
+                    self.connect()
+                with self.conn:
+                    cur = self.conn.cursor()
+                    cur.execute("INSERT INTO hardwares VALUES (?,?,?)", (None, name, sys_id))
+                self.rest.post_hardware(hw_data)
 
-        for data in response:
-            #print '\n' + '-' * 80
-            #print json.dumps(data, indent=4, sort_keys=True)
-            devData         = {}
-            sys_id          = self.value(data, 'sys_id')
-            name            = data['name']
-            # we do not want duplicate names, right?
-            if name in self.names:
-                name        = name + '_' + sys_id
-            self.names.append(name)
-            domain          = self.value(data, 'dns_domain')
-            fqdn            = self.value(data, 'fqdn')
-            serial_no       = self.value(data, 'serial_number')
-            # asset might not have 'value' field - we must handle that
-            try:
-                asset_no    = self.value(data, 'asset')['value']
-            except:
-                asset_no    = None
-            os              = self.value(data, 'os')
-            os_ver          = self.value(data, 'os_version')
-            cpu_count       = self.value(data, 'cpu_count')
-            cpu_name        = self.value(data, 'cpu_name')
-            cpu_speed       = self.value(data, 'cpu_speed')
-            cpu_type        = self.value(data, 'cpu_type')
-            cpu_core_count  = self.value(data, 'cpu_core_count')
-            disk_space      = self.value(data, 'disk_space')
-            ram             = self.value(data, 'ram')
-            # is it virtual?
-            virt            = self.value(data, 'virtual')
-            if virt in ('true', 'True'):
-                dev_type    = 'virtual'
-            else:
-                dev_type    = 'physical'
+    def get_buildings(self):
+        table = 'cmdb_ci_datacenter'
+        if DEBUG:
+            print '\n[!] Processing table "%s"' % (table)
+        response = self.fetch_data(table)
 
-            devData.update({'name':name})
-            if serial_no:
-                devData.update({'serial_no':serial_no})
-            if os:
-                devData.update({'os':os})
-            if os_ver:
-                devData.update({'osver':os_ver})
-            if ram and '-' not in ram:
-                devData.update({'memory':ram})
-            if cpu_count:
-                devData.update({'cpucount':cpu_count})
-            if cpu_core_count:
-                devData.update({'cpu_core':cpu_core_count})
-            if cpu_speed:
-                devData.update({'cpupower':cpu_speed})
-            if asset_no:
-                devData.update({'asset_no':asset_no})
-            devData.update({'type':dev_type})
+        if response:
+            for rec in response:
+                building_data   = {}
+                data_sys_id     = rec['sys_id']
+                name            = rec['name']
+                loc_sys_id      = rec['location']['value']
+                self.datacenters.update({data_sys_id:name})
+                sql             = 'SELECT * FROM locations WHERE loc_sys_id="%s"' % loc_sys_id
+                result          = self.query_db(sql,level=1)
+                if result:
+                    id, sys_id, locname, country, city, street = result
+                    if not name:
+                        name = country +'/'+ city +'/'+ street
+                    address = country +'/'+ city +'/'+ street
+                    building_data.update({'name':name})
+                    building_data.update({'address':address})
+                    self.rest.post_building(building_data)
 
-            # upload device data
-            self.rest.post_device(devData)
+    def get_rooms(self):
+        table = 'cmdb_ci_computer_room'
+        if DEBUG:
+            print '\n[!] Processing table "%s"' % (table)
+        response = self.fetch_data(table)
 
-            # add data to db - neede for IP upload
-            if not self.conn:
-                self.connect()
-            with self.conn:
-                cur = self.conn.cursor()
+        if response:
+            for rec in response:
+                room_data   = {}
+                name        = self.value(rec,'name')
+                sys_id      = self.value(rec,'sys_id')
+                parent      = self.get_parent(sys_id)
+                building    = self.datacenters[parent]
+                self.rooms.update({sys_id:name})
+                room_data.update({'name':name})
+                room_data.update({'building':building})
+                self.rest.post_room(room_data)
 
-                cur.execute('INSERT INTO devices VALUES (?,?,?)',(None, sys_id, name))
+    def get_zones(self):
+        """
+        In case ZONE_AS_ROOM=True, zones are uploaded as rooms to the parent building.
 
+        1. ZONE_AS_ROOM = False:
+         ----------      ------      ------
+        | building | -> | room | -> | zone |
+         ----------      ------      ------
+
+         2. ZONE_AS_ROOM = True
+         ----------                  ------
+        | building | -------------> | zone |
+         ----------        |         ------
+                           |         ------
+                            ------> | room |
+                                     ------
+        :return:
+        """
+
+        table = 'cmdb_ci_zone'
+        if DEBUG:
+            print '\n[!] Processing table "%s"' % (table)
+        response   = self.fetch_data(table)
+        #print json.dumps(response, indent=4, sort_keys=True)
+        if response:
+            for rec in response:
+                room_data   = {}
+                name        = self.value(rec,'name')
+                sys_id      = self.value(rec,'sys_id')
+                parent      = self.get_parent(sys_id)
+                grandparent = self.get_parent(parent)
+                building    = self.datacenters[grandparent]
+                self.rooms.update({sys_id:name})
+                room_data.update({'name':name})
+                room_data.update({'building':building})
+                self.rest.post_room(room_data)
+
+    def get_racks(self):
+        table = 'cmdb_ci_rack'
+        if DEBUG:
+            print '\n[!] Processing table "%s"' % (table)
+        response = self.fetch_data(table)
+        #print json.dumps(response, indent=4, sort_keys=True)
+        if response:
+            for rec in response:
+                rack_data   = {}
+                sys_id      = self.value(rec ,'sys_id')
+                name        = self.value(rec ,'name')
+                self.racks.update({sys_id:name})
+                rack_size   = self.value(rec ,'rack_units')
+                rack_data.update({'name':name})
+                rack_data.update({'size':rack_size})
+
+                try:
+                    parent      = self.get_parent(sys_id)
+                    if parent:
+                        room= self.rooms[parent]
+                        rack_data.update({'room':room})
+                except:
+                    pass
+                self.rest.post_rack(rack_data)
+
+    def get_computers(self, table):
+        if DEBUG:
+            print '\n[!] Processing table "%s"' % (table)
+        response = self.fetch_data(table)
+        if response:
+            for data in response:
+                #print json.dumps(data, indent=4, sort_keys=True)
+                devData         = {}
+                rack_data       = {}
+                sys_id          = self.value(data, 'sys_id')
+                name            = data['name']
+                # we do not want duplicate names, right?
+                if name in self.names:
+                    name        = name + '_' + sys_id
+                self.names.append(name)
+                domain          = self.value(data, 'dns_domain')
+                fqdn            = self.value(data, 'fqdn')
+                serial_no       = self.value(data, 'serial_number')
+                # asset might not have 'value' field - we must handle that
+                try:
+                    asset_no    = self.value(data, 'asset')['value']
+                except:
+                    asset_no    = None
+                os              = self.value(data, 'os')
+                os_ver          = self.value(data, 'os_version')
+                cpu_count       = self.value(data, 'cpu_count')
+                cpu_name        = self.value(data, 'cpu_name')
+                cpu_speed       = self.value(data, 'cpu_speed')
+                cpu_type        = self.value(data, 'cpu_type')
+                cpu_core_count  = self.value(data, 'cpu_core_count')
+                disk_space      = self.value(data, 'disk_space')
+                ram             = self.value(data, 'ram')
+                # is it virtual?
+                virt            = self.value(data, 'virtual')
+                if virt in ('true', 'True'):
+                    dev_type    = 'virtual'
+                else:
+                    dev_type    = 'physical'
+
+                devData.update({'name':name})
+                rack_data.update({'device':name})
+                if serial_no:
+                    devData.update({'serial_no':serial_no})
+                if os:
+                    devData.update({'os':os})
+                if os_ver:
+                    devData.update({'osver':os_ver})
+                if ram and '-' not in ram:
+                    devData.update({'memory':ram})
+                if cpu_count:
+                    devData.update({'cpucount':cpu_count})
+                if cpu_core_count:
+                    devData.update({'cpu_core':cpu_core_count})
+                if cpu_speed:
+                    devData.update({'cpupower':cpu_speed})
+                if asset_no:
+                    devData.update({'asset_no':asset_no})
+                devData.update({'type':dev_type})
+
+                hw_id = self.value(self.value(data, 'model_id'),'value')
+                if hw_id:
+                    sql = 'SELECT name FROM hardwares WHERE sys_id="%s"' % hw_id
+                    hw_model =  self.query_db(sql)
+                    devData.update({'hw_model':hw_model})
+                    rack_data.update({'hw_model':hw_model})
+
+                # upload device data
+                self.rest.post_device(devData)
+
+                # add data to db - needed for IP upload
+                if not self.conn:
+                    self.connect()
+                with self.conn:
+                    cur = self.conn.cursor()
+                    try:
+                        cur.execute('INSERT INTO devices VALUES (?,?,?)',(None, sys_id, name))
+                    except Exception, e:
+                        pass
+
+
+                # try to find out if the parent is rack, room or building (or any combination of them)
+                rack_id = self.get_parent(sys_id)
+                if rack_id and rack_id in self.racks:
+                    # it's rack mounted!
+                    rack_data.update({'start_at':'auto'}) # servicenow has no idea regarding where the device is mounted
+                    rack_name = self.racks[rack_id]
+                    rack_data.update({'rack':rack_name})
+
+                    # there might be multiple racks with same name. We must find room & building as well
+                    room_id = self.get_parent(rack_id)
+                    if room_id and room_id in self.rooms:
+                        room_name = self.rooms[room_id]
+                        rack_data.update({'room':room_name})
+
+                        building_id = self.get_parent(room_id)
+                        if building_id and building_id in self.datacenters:
+                            building_name = self.datacenters[building_id]
+                            rack_data.update({'building':building_name})
+                    self.rest.mount_to_rack(rack_data, name)
 
     def get_adapters(self):
         if DEBUG:
@@ -318,7 +585,6 @@ class ServiceNow():
                     cur.execute("INSERT INTO addresses VALUES (?,?,?,?)", (None, ipaddress, netmask, nic_sys_id) )
 
     def upload_adapters(self):
-        #print '\nRESULT: ' + '-' * 80
         if not self.conn:
             self.connect()
         with self.conn:
@@ -347,59 +613,23 @@ class ServiceNow():
 
 
 
-
-    """
-    def print_ips(self):
-        print '\n' + '-' * 80
-
-        if not self.conn:
-            self.connect()
-        with self.conn:
-            cur = self.conn.cursor()
-            cur.execute("SELECT * FROM addresses")
-            raw = cur.fetchall()
-            print [description[0] for description in cur.description]
-        for x in raw:
-            print x
-
-    def print_devices(self):
-        print '\n' + '-' * 80
-        if not self.conn:
-            self.connect()
-        with self.conn:
-            cur = self.conn.cursor()
-            cur.execute('SELECT * from devices')
-            raw = cur.fetchall()
-            print [description[0] for description in cur.description]
-        for x in raw:
-            print x
-
-    def print_adapters(self):
-        print '\n' + '-' * 80
-        if not self.conn:
-            self.connect()
-        with self.conn:
-            cur = self.conn.cursor()
-            cur.execute('SELECT * from adapters')
-            raw = cur.fetchall()
-            print [description[0] for description in cur.description]
-        for x in raw:
-            print x
-    """
-
-
 if __name__ == '__main__':
     snow = ServiceNow()
     snow.create_db()
-
-    for table in TABLES:
-        snow.fetch_data(table)
+    snow.get_relationships()
+    snow.get_manufacturers()
+    snow.get_hardware()
+    snow.get_locations()
+    snow.get_buildings()
+    snow.get_rooms()
+    if ZONE_AS_ROOM:
+        snow.get_zones()
+    snow.get_racks()
+    for table in DEVICES:
+        snow.get_computers(table)
     snow.get_adapters()
     snow.get_ips()
-
     snow.upload_adapters()
-
-
 
     sys.exit()
 
