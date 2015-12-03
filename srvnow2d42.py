@@ -43,7 +43,7 @@ DEVICES     = ['cmdb_ci_server','cmdb_ci_app_server', 'cmdb_ci_database', 'cmdb_
 # ===== Other ===== #
 DEBUG        = True
 DRY_RUN      = False
-ZONE_AS_ROOM = False # for explanation take a look at get_zones() docstring
+ZONE_AS_ROOM = True # for explanation take a look at get_zones() docstring
 
 
 
