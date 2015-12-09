@@ -1,8 +1,14 @@
 #!/usr/bin/python
 
 """
-GOTCHAS
+README
+This script reads CIs from Servicenow and uploads them to Device42.
+It has 2 modes:
+1. Full migration  - when the TIMEFRAME is set to 0
+2. Synchronization - when the TIMEFRAME is set to anything else but 0
 
+
+GOTCHAS
 * In order for hardwares to be migrated, hardware must have unique name.
 
 
@@ -10,10 +16,11 @@ GOTCHAS
 
 import sys
 import re
+import json
 import base64
 import requests
 import sqlite3 as sql
-
+from datetime import datetime, timedelta
 
 try:
     requests.packages.urllib3.disable_warnings()
@@ -22,8 +29,8 @@ except AttributeError:
 
 
 __copyright__   = "Copyright 2015, Device42 LLC"
-__version__     = "1.0.3"
-__status__      = "Testing"
+__version__     = "2.0.0"
+__status__      = "Production"
 
 
 # ===== Device42 ===== #
@@ -35,19 +42,24 @@ D42_URL     = 'https://192.168.3.30'
 USERNAME    = 'admin'
 PASSWORD    = 'P@ssw0rd'
 BASE_URL    = 'https://dev13344.service-now.com/api/now/table/'
-LIMIT       = 1000000
+LIMIT       = 1000000 # number of CIs to retrieve from ServiceNow
 HEADERS     = {"Content-Type":"application/json","Accept":"application/json"}
 DEVICES     = ['cmdb_ci_server','cmdb_ci_app_server', 'cmdb_ci_database', 'cmdb_ci_email_server',
                'cmdb_ci_ftp_server', 'cmdb_ci_directory_server', 'cmdb_ci_ip_server', 'cmdb_ci_computer']
 
 # ===== Other ===== #
-DEBUG        = True
-DRY_RUN      = False
-ZONE_AS_ROOM = True # for explanation take a look at get_zones() docstring
+DEBUG        = False    # print to STDOUT
+DRY_RUN      = False    # Do not upload to Device42 (DRY_RUN=False)
+ZONE_AS_ROOM = True     # for the explanation take a look at get_zones() docstring
+TIMEFRAME    = 12       # Value represents hours. If set to 0, script does full migration, if set to any other value,
+                        # script syncs changes from TIMESTAMP till now(). now() referes to current localtime.
 
 
 
 class Rest():
+    """
+    All of the download/upload stuff goes here.
+    """
     def __init__(self):
         self.base_url   = D42_URL
         self.username   = D42_USER
@@ -56,21 +68,27 @@ class Rest():
 
 
     def uploader(self, data, url):
-            payload = data
-            headers = {
-                'Authorization': 'Basic ' + base64.b64encode(self.username + ':' + self.password),
-                'Content-Type': 'application/x-www-form-urlencoded'
-            }
+        """
+        Uploads data to Device42
+        :param data: data to upload
+        :param url: URl to upload data to
+        :return:
+        """
+        payload = data
+        headers = {
+            'Authorization': 'Basic ' + base64.b64encode(self.username + ':' + self.password),
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
 
-            r = requests.post(url, data=payload, headers=headers, verify=False)
-            msg =  unicode(payload)
-            if self.debug:
-                print '\t\t',msg
-            msg = '\t\t[!]Status code: %s' % str(r.status_code)
-            print msg
-            msg = str(r.text)
-            if self.debug:
-                print '\t\t', msg
+        r = requests.post(url, data=payload, headers=headers, verify=False)
+        msg =  unicode(payload)
+        if self.debug:
+            print '\t\t',msg
+        msg = '\t\t[!]Status code: %s' % str(r.status_code)
+        print msg
+        msg = str(r.text)
+        if self.debug:
+            print '\t\t', msg
 
     def post_device(self, data):
         if DRY_RUN == False:
@@ -137,6 +155,9 @@ class Rest():
             self.uploader(data, url)
 
 class ServiceNow():
+    """
+    All ServiceNow stuff goes here
+    """
     def __init__(self):
         self.total      = 0
         self.names      = []
@@ -153,10 +174,18 @@ class ServiceNow():
             self.base_url = BASE_URL + '/'
 
     def connect(self):
+        """
+        Connect to an in-memory database
+        :return:
+        """
         self.conn = sql.connect(':memory:')
 
 
     def create_db(self):
+        """
+        Create database tables
+        :return:
+        """
         if not self.conn:
             self.connect()
 
@@ -197,6 +226,11 @@ class ServiceNow():
                         "sys_id TEXT UNIQUE )")
 
     def strip_html(self, raw):
+        """
+        Some text has embedded html tags that we must remove
+        :param raw: Text with HTML
+        :return: Text without HTML
+        """
         if raw:
             result = re.sub("<.*?>", "", raw)
         else:
@@ -205,6 +239,12 @@ class ServiceNow():
 
 
     def query_db(self, query ,level=2):
+        """
+        Query database
+        :param query: SQL query
+        :param level: Database response slicing level
+        :return: Data returned from the database
+        """
         if not self.conn:
             self.connect()
         with self.conn:
@@ -227,6 +267,11 @@ class ServiceNow():
         return response
 
     def get_parent(self, sys_id):
+        """
+        Get parent sys_id
+        :param sys_id: Child's sys_id
+        :return: parent's sys_id
+        """
         try:
             sql     = 'SELECT child FROM relationships WHERE parent="%s"' % sys_id
             parent  = self.query_db(sql)
@@ -234,8 +279,29 @@ class ServiceNow():
             parent  = None
         return parent
 
+
+    def get_timestamp(self):
+        """
+        Return time.now() - TIMEFRAME to be used in search filters during synchronization process
+        :return: Timestamp
+        """
+        now = datetime.now()
+        ts = now - timedelta(hours = int(TIMEFRAME))
+        return ts
+
+
     def fetch_data(self, table):
-        URL = self.base_url + table + '?sysparm_limit=%s' % LIMIT
+        """
+        Get the data from ServiceNow
+        :param table: Table to query
+        :return: Table data
+        """
+        if TIMEFRAME and table != 'cmdb_rel_ci':
+            TIMESTAMP = self.get_timestamp()
+            URL = self.base_url + table + '?sysparm_limit=%s&sysparm_query=sys_updated_on>%s' % (LIMIT, TIMESTAMP)
+        else:
+            URL = self.base_url + table + '?sysparm_limit=%s' % LIMIT
+
         response = requests.get(URL, auth=(USERNAME, PASSWORD), headers=HEADERS)
         if response.status_code == 200:
             response = response.json()
@@ -246,6 +312,12 @@ class ServiceNow():
 
 
     def value(self, data, word):
+        """
+        Check if key exists using try/except block. If it exists, return it's value.
+        :param data: Data (CI's JSON)
+        :param word: Key to check
+        :return: Key's value
+        """
         try:
             val = data['%s' % word]
             if val == '':
@@ -256,6 +328,10 @@ class ServiceNow():
 
 
     def get_locations(self):
+        """
+        Get locations from ServiceNow and insert them into the database
+        :return: 
+        """
         table = 'cmn_location'
         if DEBUG:
             print '\n[!] Processing table "%s"' % (table)
@@ -276,6 +352,10 @@ class ServiceNow():
                                 (None, loc_sys_id,name,country,city,street))
 
     def get_relationships(self):
+        """
+        Get relationships from SN and insert them into the database
+        :return: 
+        """
         table = 'cmdb_rel_ci'
         if DEBUG:
             print '\n[!] Processing table "%s"' % (table)
@@ -293,6 +373,10 @@ class ServiceNow():
                     cur.execute('INSERT INTO relationships VALUES (?,?,?)',(None,parent,child))
 
     def get_manufacturers(self):
+        """
+        Get manufacturers from SN and insert them into the database
+        :return: 
+        """
         table = 'core_company'
         if DEBUG:
             print '\n[!] Processing table "%s"' % (table)
@@ -309,6 +393,10 @@ class ServiceNow():
                     cur.execute("INSERT INTO manufacturers VALUES (?,?,?)", (None, name, sys_id))
 
     def get_hardware(self):
+        """
+        Get hardware from SN and upload it to the Device42
+        :return:
+        """
         table = 'cmdb_hardware_product_model'
         if DEBUG:
             print '\n[!] Processing table "%s"' % (table)
@@ -340,6 +428,10 @@ class ServiceNow():
                 self.rest.post_hardware(hw_data)
 
     def get_buildings(self):
+        """
+        Get buildings from SN and upload them to the Device42
+        :return:
+        """
         table = 'cmdb_ci_datacenter'
         if DEBUG:
             print '\n[!] Processing table "%s"' % (table)
@@ -364,6 +456,10 @@ class ServiceNow():
                     self.rest.post_building(building_data)
 
     def get_rooms(self):
+        """
+        Get rooms from SN and upload them to the Device42
+        :return:
+        """
         table = 'cmdb_ci_computer_room'
         if DEBUG:
             print '\n[!] Processing table "%s"' % (table)
@@ -383,6 +479,7 @@ class ServiceNow():
 
     def get_zones(self):
         """
+        Get zones from SN and upload them to the Device42
         In case ZONE_AS_ROOM=True, zones are uploaded as rooms to the parent building.
 
         1. ZONE_AS_ROOM = False:
@@ -419,6 +516,11 @@ class ServiceNow():
                 self.rest.post_room(room_data)
 
     def get_racks(self):
+        """
+        Get racks from SN and upload them to the Device42
+        :return:
+        """
+
         table = 'cmdb_ci_rack'
         if DEBUG:
             print '\n[!] Processing table "%s"' % (table)
@@ -444,6 +546,11 @@ class ServiceNow():
                 self.rest.post_rack(rack_data)
 
     def get_computers(self, table):
+        """
+        Get computers from SN and upload them to the Device42
+        :param table:
+        :return:
+        """
         if DEBUG:
             print '\n[!] Processing table "%s"' % (table)
         response = self.fetch_data(table)
@@ -544,6 +651,10 @@ class ServiceNow():
                     self.rest.mount_to_rack(rack_data, name)
 
     def get_adapters(self):
+        """
+        Get adapters from SN and insert them into the database
+        :return:
+        """
         if DEBUG:
             print '\n[!] Fetching network adapters'
         table = 'cmdb_ci_network_adapter'
@@ -567,6 +678,10 @@ class ServiceNow():
                     cur.execute("INSERT INTO addresses VALUES (?,?,?,?)", (None, ip_address, netmask, nic_sys_id) )
 
     def get_ips(self):
+        """
+        Get IPs from SN and insert them into the database
+        :return:
+        """
         if DEBUG:
             print '\n[!] Fetching IP addresses'
         table = 'cmdb_ci_ip_address'
@@ -585,6 +700,10 @@ class ServiceNow():
                     cur.execute("INSERT INTO addresses VALUES (?,?,?,?)", (None, ipaddress, netmask, nic_sys_id) )
 
     def upload_adapters(self):
+        """
+        Get data from database, construct IP and MAC data and upload it to Device42
+        :return:
+        """
         if not self.conn:
             self.connect()
         with self.conn:
