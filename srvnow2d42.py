@@ -46,7 +46,7 @@ BASE_URL    = 'https://dev13344.service-now.com/api/now/table/'
 LIMIT       = 1000000 # number of CIs to retrieve from ServiceNow
 HEADERS     = {"Content-Type":"application/json","Accept":"application/json"}
 DEVICES     = ['cmdb_ci_server','cmdb_ci_app_server', 'cmdb_ci_database', 'cmdb_ci_email_server',
-               'cmdb_ci_ftp_server', 'cmdb_ci_directory_server', 'cmdb_ci_ip_server']#, 'cmdb_ci_computer']
+               'cmdb_ci_ftp_server', 'cmdb_ci_directory_server', 'cmdb_ci_ip_server', 'cmdb_ci_computer']
 
 # ===== Other ===== #
 DEBUG        = False    # print to STDOUT
