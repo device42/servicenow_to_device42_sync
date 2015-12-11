@@ -49,8 +49,8 @@ DEVICES     = ['cmdb_ci_server','cmdb_ci_app_server', 'cmdb_ci_database', 'cmdb_
                'cmdb_ci_ftp_server', 'cmdb_ci_directory_server', 'cmdb_ci_ip_server']#, 'cmdb_ci_computer']
 
 # ===== Other ===== #
-DEBUG        = True    # print to STDOUT
-DRY_RUN      = False   # Do not upload to Device42 (DRY_RUN=False)
+DEBUG        = False    # print to STDOUT
+DRY_RUN      = False   # Upload to Device42 or not
 ZONE_AS_ROOM = True    # for the explanation take a look at get_zones() docstring
 TIMEFRAME    = 6       # Value represents hours. If set to 0, script does full migration, if set to any other value,
                        # script syncs changes back from  till now(). now() refers to current localtime.
