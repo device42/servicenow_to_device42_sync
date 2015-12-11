@@ -10,8 +10,9 @@ It has 2 modes:
 
 GOTCHAS
 * In order for hardwares to be migrated, hardware must have unique name.
-
-
+* When there are multiple devices with the same name, device name is constructed as: "device_name" + "_" + "servicenow_sys_id"
+    i.e. " MacBook Air 13" " will become " MacBook Air 13"_01a9280d3790200044e0bfc8bcbe5d79 "
+*
 """
 
 import sys
@@ -29,7 +30,7 @@ except AttributeError:
 
 
 __copyright__   = "Copyright 2015, Device42 LLC"
-__version__     = "2.0.0"
+__version__     = "2.0.1"
 __status__      = "Production"
 
 
@@ -45,14 +46,14 @@ BASE_URL    = 'https://dev13344.service-now.com/api/now/table/'
 LIMIT       = 1000000 # number of CIs to retrieve from ServiceNow
 HEADERS     = {"Content-Type":"application/json","Accept":"application/json"}
 DEVICES     = ['cmdb_ci_server','cmdb_ci_app_server', 'cmdb_ci_database', 'cmdb_ci_email_server',
-               'cmdb_ci_ftp_server', 'cmdb_ci_directory_server', 'cmdb_ci_ip_server', 'cmdb_ci_computer']
+               'cmdb_ci_ftp_server', 'cmdb_ci_directory_server', 'cmdb_ci_ip_server']#, 'cmdb_ci_computer']
 
 # ===== Other ===== #
-DEBUG        = False    # print to STDOUT
-DRY_RUN      = False    # Do not upload to Device42 (DRY_RUN=False)
-ZONE_AS_ROOM = True     # for the explanation take a look at get_zones() docstring
-TIMEFRAME    = 12       # Value represents hours. If set to 0, script does full migration, if set to any other value,
-                        # script syncs changes from TIMESTAMP till now(). now() referes to current localtime.
+DEBUG        = True    # print to STDOUT
+DRY_RUN      = False   # Do not upload to Device42 (DRY_RUN=False)
+ZONE_AS_ROOM = True    # for the explanation take a look at get_zones() docstring
+TIMEFRAME    = 6       # Value represents hours. If set to 0, script does full migration, if set to any other value,
+                       # script syncs changes back from  till now(). now() refers to current localtime.
 
 
 
@@ -83,12 +84,13 @@ class Rest():
         r = requests.post(url, data=payload, headers=headers, verify=False)
         msg =  unicode(payload)
         if self.debug:
-            print '\t\t',msg
-        msg = '\t\t[!]Status code: %s' % str(r.status_code)
-        print msg
+            print '\t\t%s' % msg
+        msg = '\t\t[!] Status code: %s' % str(r.status_code)
+        if self.debug:
+            print '%s' % msg
         msg = str(r.text)
         if self.debug:
-            print '\t\t', msg
+            print '\t\t%s'% msg
 
     def post_device(self, data):
         if DRY_RUN == False:
@@ -301,7 +303,6 @@ class ServiceNow():
             URL = self.base_url + table + '?sysparm_limit=%s&sysparm_query=sys_updated_on>%s' % (LIMIT, TIMESTAMP)
         else:
             URL = self.base_url + table + '?sysparm_limit=%s' % LIMIT
-
         response = requests.get(URL, auth=(USERNAME, PASSWORD), headers=HEADERS)
         if response.status_code == 200:
             response = response.json()
@@ -309,6 +310,34 @@ class ServiceNow():
                 return response['result']
             except:
                 return None
+        else:
+            if DEBUG:
+                print '\t\t[!] Status code: %d' % response.status_code
+
+    def fetch_single_ci(self, table, sys_id):
+        """
+        Get single Ci from SN
+        :param table: table to query
+        :param sys_id: sys id to search for
+        :return: result or None
+        """
+        if table:
+            tables = [table]
+        else:
+            tables = ['cmdb_ci_rack', 'cmdb_ci_computer_room', 'cmdb_ci_zone', 'cmdb_ci_datacenter']
+
+        for table in tables:
+            URL = self.base_url + table +'/' + sys_id
+            response = requests.get(URL, auth=(USERNAME, PASSWORD), headers=HEADERS)
+            if response.status_code == 200:
+                response = response.json()
+                try:
+                    return response['result']
+                except:
+                    pass
+            else:
+                if DEBUG:
+                    print '\t\t[!] Status code: %d' % response.status_code
 
 
     def value(self, data, word):
@@ -565,8 +594,6 @@ class ServiceNow():
                 if name in self.names:
                     name        = name + '_' + sys_id
                 self.names.append(name)
-                domain          = self.value(data, 'dns_domain')
-                fqdn            = self.value(data, 'fqdn')
                 serial_no       = self.value(data, 'serial_number')
                 # asset might not have 'value' field - we must handle that
                 try:
@@ -576,11 +603,8 @@ class ServiceNow():
                 os              = self.value(data, 'os')
                 os_ver          = self.value(data, 'os_version')
                 cpu_count       = self.value(data, 'cpu_count')
-                cpu_name        = self.value(data, 'cpu_name')
                 cpu_speed       = self.value(data, 'cpu_speed')
-                cpu_type        = self.value(data, 'cpu_type')
                 cpu_core_count  = self.value(data, 'cpu_core_count')
-                disk_space      = self.value(data, 'disk_space')
                 ram             = self.value(data, 'ram')
                 # is it virtual?
                 virt            = self.value(data, 'virtual')
@@ -610,11 +634,13 @@ class ServiceNow():
                 devData.update({'type':dev_type})
 
                 hw_id = self.value(self.value(data, 'model_id'),'value')
+                hw_model = None
                 if hw_id:
                     sql = 'SELECT name FROM hardwares WHERE sys_id="%s"' % hw_id
                     hw_model =  self.query_db(sql)
-                    devData.update({'hw_model':hw_model})
-                    rack_data.update({'hw_model':hw_model})
+                    if hw_model:
+                        devData.update({'hw_model':hw_model})
+                        rack_data.update({'hw_model':hw_model})
 
                 # upload device data
                 self.rest.post_device(devData)
@@ -628,7 +654,6 @@ class ServiceNow():
                         cur.execute('INSERT INTO devices VALUES (?,?,?)',(None, sys_id, name))
                     except Exception, e:
                         pass
-
 
                 # try to find out if the parent is rack, room or building (or any combination of them)
                 rack_id = self.get_parent(sys_id)
@@ -649,6 +674,46 @@ class ServiceNow():
                             building_name = self.datacenters[building_id]
                             rack_data.update({'building':building_name})
                     self.rest.mount_to_rack(rack_data, name)
+                elif rack_id and not rack_id in self.racks:
+                    self.walked_data = {}
+                    # search for hardware model
+                    table = 'cmdb_hardware_product_model'
+                    walked_hw = self.fetch_single_ci(table,  hw_id)
+                    if walked_hw:
+                        name  = self.value(walked_hw, 'name')
+                        if name:
+                            self.walked_data.update({'hw_model':name})
+                            # if we are synchronizing, it might happend that self.racks is not populated,
+                            # so we might miss some important relations.
+                            # We will try to get that info manually
+                            self.walk_by_id(rack_id)
+                            if self.walked_data:
+                                rack_data.update(self.walked_data)
+                                self.rest.mount_to_rack(rack_data, name)
+
+    def walk_by_id(self, x_id):
+        response = self.fetch_single_ci(None, x_id)
+        if response:
+            name  = self.value(response,'name')
+            sys_id = self.value(response,'sys_id')
+            subcategory = self.value(response, 'subcategory')
+            if subcategory.lower() == 'rack':
+                self.walked_data.update({'start_at':'auto'})
+                self.walked_data.update({'rack':name})
+            if subcategory.lower() == 'data center zone':
+                if ZONE_AS_ROOM:
+                    self.walked_data.update({'room':name})
+            if subcategory.lower() == 'computer room':
+                if not ZONE_AS_ROOM:
+                    self.walked_data.update({'room':name})
+            if subcategory.lower() == 'data center':
+                self.walked_data.update({'building':name})
+
+            parent_id = self.get_parent(sys_id)
+            if parent_id:
+                self.walk_by_id(parent_id)
+            else:
+                return self.walked_data
 
     def get_adapters(self):
         """
@@ -658,24 +723,26 @@ class ServiceNow():
         if DEBUG:
             print '\n[!] Fetching network adapters'
         table = 'cmdb_ci_network_adapter'
-        URL = self.base_url + table
-        response = requests.get(URL, auth=(USERNAME, PASSWORD), headers=HEADERS)
-        all_nics = response.json()['result']
-        for rec in all_nics:
-            #print json.dumps(rec, indent=4, sort_keys=True)
-            if 'value' in rec['cmdb_ci']:
-                dev_sys_id  = rec['cmdb_ci']['value']
-                nic_sys_id  = rec['sys_id']
-                ip_address  = rec['ip_address']
-                mac_address = rec['mac_address']
-                nic_name    = rec['name']
-                netmask     = rec['netmask']
-                if not self.conn:
-                    self.connect()
-                with self.conn:
-                    cur = self.conn.cursor()
-                    cur.execute("INSERT INTO adapters VALUES (?,?,?,?,?)", (None, nic_sys_id, mac_address, nic_name, dev_sys_id))
-                    cur.execute("INSERT INTO addresses VALUES (?,?,?,?)", (None, ip_address, netmask, nic_sys_id) )
+        #URL = self.base_url + table
+        #response = requests.get(URL, auth=(USERNAME, PASSWORD), headers=HEADERS)
+        #all_nics = response.json()['result']
+        all_nics = self.fetch_data(table)
+        if all_nics:
+            for rec in all_nics:
+                #print json.dumps(rec, indent=4, sort_keys=True)
+                if 'value' in rec['cmdb_ci']:
+                    dev_sys_id  = rec['cmdb_ci']['value']
+                    nic_sys_id  = rec['sys_id']
+                    ip_address  = rec['ip_address']
+                    mac_address = rec['mac_address']
+                    nic_name    = rec['name']
+                    netmask     = rec['netmask']
+                    if not self.conn:
+                        self.connect()
+                    with self.conn:
+                        cur = self.conn.cursor()
+                        cur.execute("INSERT INTO adapters VALUES (?,?,?,?,?)", (None, nic_sys_id, mac_address, nic_name, dev_sys_id))
+                        cur.execute("INSERT INTO addresses VALUES (?,?,?,?)", (None, ip_address, netmask, nic_sys_id) )
 
     def get_ips(self):
         """
@@ -685,19 +752,21 @@ class ServiceNow():
         if DEBUG:
             print '\n[!] Fetching IP addresses'
         table = 'cmdb_ci_ip_address'
-        URL = self.base_url + table
-        response = requests.get(URL, auth=(USERNAME, PASSWORD), headers=HEADERS)
-        for rec in response.json()['result']:
-            nic_sys_id  = self.value(rec['nic'],'value')
-            ipaddress   = self.value(rec, 'ip_address')
-            netmask     = self.value(rec, 'netmask')
+        #URL = self.base_url + table
+        #response = requests.get(URL, auth=(USERNAME, PASSWORD), headers=HEADERS)
+        all_ips = self.fetch_data(table)
+        if all_ips:
+            for rec in all_ips:
+                nic_sys_id  = self.value(rec['nic'],'value')
+                ipaddress   = self.value(rec, 'ip_address')
+                netmask     = self.value(rec, 'netmask')
 
-            if ipaddress:
-                if not self.conn:
-                    self.connect()
-                with self.conn:
-                    cur = self.conn.cursor()
-                    cur.execute("INSERT INTO addresses VALUES (?,?,?,?)", (None, ipaddress, netmask, nic_sys_id) )
+                if ipaddress:
+                    if not self.conn:
+                        self.connect()
+                    with self.conn:
+                        cur = self.conn.cursor()
+                        cur.execute("INSERT INTO addresses VALUES (?,?,?,?)", (None, ipaddress, netmask, nic_sys_id) )
 
     def upload_adapters(self):
         """
@@ -726,9 +795,10 @@ class ServiceNow():
 
             macdata.update({'macaddress':macaddress})
             macdata.update({'device':device})
-
-            self.rest.post_ip(ipdata)
-            self.rest.post_mac(macdata)
+            if ipaddress:
+                self.rest.post_ip(ipdata)
+            if macaddress:
+                self.rest.post_mac(macdata)
 
 
 
