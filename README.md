@@ -7,6 +7,7 @@ that integrates centralized password management, impact charts and applications 
 
 This script reads CIs from Servicenow and uploads them to Device42.
 It has 2 modes:
+
 1. Full migration  - when the TIMEFRAME is set to 0
 2. Synchronization - when the TIMEFRAME is set to anything else but 0
 
