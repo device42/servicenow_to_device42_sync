@@ -1,19 +1,4 @@
-#!/usr/bin/python
 
-"""
-README
-This script reads CIs from Servicenow and uploads them to Device42.
-It has 2 modes:
-1. Full migration  - when the TIMEFRAME is set to 0
-2. Synchronization - when the TIMEFRAME is set to anything else but 0
-
-
-GOTCHAS
-* In order for hardwares to be migrated, hardware must have unique name.
-* When there are multiple devices with the same name, device name is constructed as: "device_name" + "_" + "servicenow_sys_id"
-    i.e. " MacBook Air 13" " will become " MacBook Air 13"_01a9280d3790200044e0bfc8bcbe5d79 "
-*
-"""
 
 import sys
 import re
@@ -29,31 +14,6 @@ except AttributeError:
     pass
 
 
-__copyright__   = "Copyright 2015, Device42 LLC"
-__version__     = "2.0.1"
-__status__      = "Production"
-
-
-# ===== Device42 ===== #
-D42_USER    = 'admin'
-D42_PWD     = 'adm!nd42'
-D42_URL     = 'https://192.168.3.30'
-
-# ===== ServiceNow ===== #
-USERNAME    = 'admin'
-PASSWORD    = 'P@ssw0rd'
-BASE_URL    = 'https://dev13344.service-now.com/api/now/table/'
-LIMIT       = 1000000 # number of CIs to retrieve from ServiceNow
-HEADERS     = {"Content-Type":"application/json","Accept":"application/json"}
-DEVICES     = ['cmdb_ci_server','cmdb_ci_app_server', 'cmdb_ci_database', 'cmdb_ci_email_server',
-               'cmdb_ci_ftp_server', 'cmdb_ci_directory_server', 'cmdb_ci_ip_server', 'cmdb_ci_computer']
-
-# ===== Other ===== #
-DEBUG        = False    # print to STDOUT
-DRY_RUN      = False   # Upload to Device42 or not
-ZONE_AS_ROOM = True    # for the explanation take a look at get_zones() docstring
-TIMEFRAME    = 6       # Value represents hours. If set to 0, script does full migration, if set to any other value,
-                       # script syncs changes back from  till now(). now() refers to current localtime.
 
 
 
@@ -61,10 +21,11 @@ class Rest():
     """
     All of the download/upload stuff goes here.
     """
-    def __init__(self):
+    def __init__(self, D42_URL, D42_USER, D42_PWD, DRY_RUN, DEBUG):
         self.base_url   = D42_URL
         self.username   = D42_USER
         self.password   = D42_PWD
+        self.dry_run    = DRY_RUN
         self.debug      = DEBUG
 
 
@@ -93,7 +54,7 @@ class Rest():
             print '\t\t%s'% msg
 
     def post_device(self, data):
-        if DRY_RUN == False:
+        if self.dry_run == False:
             url = self.base_url+'/api/device/'
             msg =  '\n\t[+] Posting data to %s ' % url
             if self.debug:
@@ -101,7 +62,7 @@ class Rest():
             self.uploader(data, url)
 
     def post_ip(self, data):
-        if DRY_RUN == False:
+        if self.dry_run == False:
             url = self.base_url+'/api/ip/'
             msg =  '\t[+] Posting IP data to %s ' % url
             if self.debug:
@@ -109,7 +70,7 @@ class Rest():
             self.uploader(data, url)
 
     def post_mac(self, data):
-        if DRY_RUN == False:
+        if self.dry_run == False:
             url = self.base_url+'/api/1.0/macs/'
             msg = '\t[+] Posting MAC data to %s ' % url
             if self.debug:
@@ -117,7 +78,7 @@ class Rest():
             self.uploader(data, url)
 
     def post_building(self, data):
-        if DRY_RUN == False:
+        if self.dry_run == False:
             url = self.base_url+'/api/1.0/buildings/'
             msg = '\t[+] Posting Building data to %s ' % url
             if self.debug:
@@ -125,7 +86,7 @@ class Rest():
             self.uploader(data, url)
 
     def post_room(self, data):
-        if DRY_RUN == False:
+        if self.dry_run == False:
             url = self.base_url+'/api/1.0/rooms/'
             msg = '\t[+] Posting Room data to %s ' % url
             if self.debug:
@@ -133,7 +94,7 @@ class Rest():
             self.uploader(data, url)
 
     def post_rack(self, data):
-        if DRY_RUN == False:
+        if self.dry_run == False:
             url = self.base_url+'/api/1.0/racks/'
             msg = '\t[+] Posting Rack data to %s ' % url
             if self.debug:
@@ -141,7 +102,7 @@ class Rest():
             self.uploader(data, url)
 
     def post_hardware(self, data):
-        if DRY_RUN == False:
+        if self.dry_run == False:
             url = self.base_url+'/api/1.0/hardwares/'
             msg = '\t[+] Posting Hardware data to %s ' % url
             if self.debug:
@@ -149,7 +110,7 @@ class Rest():
             self.uploader(data, url)
 
     def mount_to_rack(self, data,device):
-        if DRY_RUN == False:
+        if self.dry_run == False:
             url = self.base_url+'/api/1.0/device/rack/'
             msg = '\n\t[+] Mounting device "%s"to %s ' % (device, url)
             if self.debug:
@@ -160,20 +121,29 @@ class ServiceNow():
     """
     All ServiceNow stuff goes here
     """
-    def __init__(self):
-        self.total      = 0
-        self.names      = []
-        self.rest       = Rest()
+    def __init__(self, D42_URL, D42_USER, D42_PWD, USERNAME, PASSWORD, BASE_URL, LIMIT,
+                 HEADERS, DEBUG, DRY_RUN, ZONE_AS_ROOM, TIMEFRAME):
+        self.total          = 0
+        self.names          = []
+        self.rest           = Rest(D42_URL, D42_USER, D42_PWD, DRY_RUN, DEBUG)
+        self.username       = USERNAME
+        self.password       = PASSWORD
+        self.base_url       = BASE_URL
+        self.limit          = LIMIT
+        self.headers        = HEADERS
+        self.debug          = DEBUG
+        self.zone_as_room   = ZONE_AS_ROOM
+        self.timeframe      = TIMEFRAME
         self.location_map   = {}
         self.conn           = None
         self.datacenters    = {} # maps datacenter ID to datacenter name
         self.rooms          = {} # maps room ID to room name
         self.racks          = {} # maps rack ID to rack name
 
-        if BASE_URL.endswith('/'):
-            self.base_url = BASE_URL
+        if self.base_url.endswith('/'):
+            self.base_url   = self.base_url
         else:
-            self.base_url = BASE_URL + '/'
+            self.base_url   = self.base_url + '/'
 
     def connect(self):
         """
@@ -288,7 +258,7 @@ class ServiceNow():
         :return: Timestamp
         """
         now = datetime.now()
-        ts = now - timedelta(hours = int(TIMEFRAME))
+        ts = now - timedelta(hours = int(self.timeframe))
         return ts
 
 
@@ -298,12 +268,12 @@ class ServiceNow():
         :param table: Table to query
         :return: Table data
         """
-        if TIMEFRAME and table != 'cmdb_rel_ci':
+        if self.timeframe and table != 'cmdb_rel_ci':
             TIMESTAMP = self.get_timestamp()
-            URL = self.base_url + table + '?sysparm_limit=%s&sysparm_query=sys_updated_on>%s' % (LIMIT, TIMESTAMP)
+            URL = self.base_url + table + '?sysparm_limit=%s&sysparm_query=sys_updated_on>%s' % (self.limit, TIMESTAMP)
         else:
-            URL = self.base_url + table + '?sysparm_limit=%s' % LIMIT
-        response = requests.get(URL, auth=(USERNAME, PASSWORD), headers=HEADERS)
+            URL = self.base_url + table + '?sysparm_limit=%s' % self.limit
+        response = requests.get(URL, auth=(self.username, self.password), headers=self.headers)
         if response.status_code == 200:
             response = response.json()
             try:
@@ -311,7 +281,7 @@ class ServiceNow():
             except:
                 return None
         else:
-            if DEBUG:
+            if self.debug:
                 print '\t\t[!] Status code: %d' % response.status_code
 
     def fetch_single_ci(self, table, sys_id):
@@ -327,17 +297,18 @@ class ServiceNow():
             tables = ['cmdb_ci_rack', 'cmdb_ci_computer_room', 'cmdb_ci_zone', 'cmdb_ci_datacenter']
 
         for table in tables:
-            URL = self.base_url + table +'/' + sys_id
-            response = requests.get(URL, auth=(USERNAME, PASSWORD), headers=HEADERS)
-            if response.status_code == 200:
-                response = response.json()
-                try:
-                    return response['result']
-                except:
-                    pass
-            else:
-                if DEBUG:
-                    print '\t\t[!] Status code: %d' % response.status_code
+            if sys_id:
+                URL = self.base_url + table +'/' + sys_id
+                response = requests.get(URL, auth=(self.username, self.password), headers=self.headers)
+                if response.status_code == 200:
+                    response = response.json()
+                    try:
+                        return response['result']
+                    except:
+                        pass
+                else:
+                    if self.debug:
+                        print '\t\t[!] Status code: %d' % response.status_code
 
 
     def value(self, data, word):
@@ -362,12 +333,11 @@ class ServiceNow():
         :return: 
         """
         table = 'cmn_location'
-        if DEBUG:
+        if self.debug:
             print '\n[!] Processing table "%s"' % (table)
         response = self.fetch_data(table)
         if response:
             for data in response:
-                #print json.dumps(data, indent=4, sort_keys=True)
                 name        = data['name']
                 country     = data['country']
                 city        = data['city']
@@ -386,7 +356,7 @@ class ServiceNow():
         :return: 
         """
         table = 'cmdb_rel_ci'
-        if DEBUG:
+        if self.debug:
             print '\n[!] Processing table "%s"' % (table)
         response = self.fetch_data(table)
 
@@ -407,12 +377,11 @@ class ServiceNow():
         :return: 
         """
         table = 'core_company'
-        if DEBUG:
+        if self.debug:
             print '\n[!] Processing table "%s"' % (table)
         response = self.fetch_data(table)
         if response:
             for rec in response:
-                #print json.dumps(data, indent=4, sort_keys=True)
                 sys_id = self.value(rec, 'sys_id')
                 name   = self.value(rec, 'name')
                 if not self.conn:
@@ -427,12 +396,11 @@ class ServiceNow():
         :return:
         """
         table = 'cmdb_hardware_product_model'
-        if DEBUG:
+        if self.debug:
             print '\n[!] Processing table "%s"' % (table)
         response = self.fetch_data(table)
         if response:
             for rec in response:
-                #print json.dumps(rec, indent=4, sort_keys=True)
                 hw_data     = {}
                 name        = self.value(rec, 'name')
                 sys_id      = self.value(rec, 'sys_id')
@@ -462,7 +430,7 @@ class ServiceNow():
         :return:
         """
         table = 'cmdb_ci_datacenter'
-        if DEBUG:
+        if self.debug:
             print '\n[!] Processing table "%s"' % (table)
         response = self.fetch_data(table)
 
@@ -490,7 +458,7 @@ class ServiceNow():
         :return:
         """
         table = 'cmdb_ci_computer_room'
-        if DEBUG:
+        if self.debug:
             print '\n[!] Processing table "%s"' % (table)
         response = self.fetch_data(table)
 
@@ -500,11 +468,15 @@ class ServiceNow():
                 name        = self.value(rec,'name')
                 sys_id      = self.value(rec,'sys_id')
                 parent      = self.get_parent(sys_id)
-                building    = self.datacenters[parent]
-                self.rooms.update({sys_id:name})
-                room_data.update({'name':name})
-                room_data.update({'building':building})
-                self.rest.post_room(room_data)
+                try:
+                    building    = self.datacenters[parent]
+                    self.rooms.update({sys_id:name})
+                    room_data.update({'name':name})
+                    room_data.update({'building':building})
+                    self.rest.post_room(room_data)
+                except KeyError:
+                    pass
+
 
     def get_zones(self):
         """
@@ -527,22 +499,24 @@ class ServiceNow():
         """
 
         table = 'cmdb_ci_zone'
-        if DEBUG:
+        if self.debug:
             print '\n[!] Processing table "%s"' % (table)
         response   = self.fetch_data(table)
-        #print json.dumps(response, indent=4, sort_keys=True)
         if response:
             for rec in response:
                 room_data   = {}
                 name        = self.value(rec,'name')
                 sys_id      = self.value(rec,'sys_id')
                 parent      = self.get_parent(sys_id)
-                grandparent = self.get_parent(parent)
-                building    = self.datacenters[grandparent]
-                self.rooms.update({sys_id:name})
-                room_data.update({'name':name})
-                room_data.update({'building':building})
-                self.rest.post_room(room_data)
+                try:
+                    grandparent = self.get_parent(parent)
+                    building    = self.datacenters[grandparent]
+                    self.rooms.update({sys_id:name})
+                    room_data.update({'name':name})
+                    room_data.update({'building':building})
+                    self.rest.post_room(room_data)
+                except KeyError:
+                    pass
 
     def get_racks(self):
         """
@@ -551,10 +525,9 @@ class ServiceNow():
         """
 
         table = 'cmdb_ci_rack'
-        if DEBUG:
+        if self.debug:
             print '\n[!] Processing table "%s"' % (table)
         response = self.fetch_data(table)
-        #print json.dumps(response, indent=4, sort_keys=True)
         if response:
             for rec in response:
                 rack_data   = {}
@@ -580,12 +553,11 @@ class ServiceNow():
         :param table:
         :return:
         """
-        if DEBUG:
+        if self.debug:
             print '\n[!] Processing table "%s"' % (table)
         response = self.fetch_data(table)
         if response:
             for data in response:
-                #print json.dumps(data, indent=4, sort_keys=True)
                 devData         = {}
                 rack_data       = {}
                 sys_id          = self.value(data, 'sys_id')
@@ -701,10 +673,10 @@ class ServiceNow():
                 self.walked_data.update({'start_at':'auto'})
                 self.walked_data.update({'rack':name})
             if subcategory.lower() == 'data center zone':
-                if ZONE_AS_ROOM:
+                if self.zone_as_room:
                     self.walked_data.update({'room':name})
             if subcategory.lower() == 'computer room':
-                if not ZONE_AS_ROOM:
+                if not self.zone_as_room:
                     self.walked_data.update({'room':name})
             if subcategory.lower() == 'data center':
                 self.walked_data.update({'building':name})
@@ -720,16 +692,12 @@ class ServiceNow():
         Get adapters from SN and insert them into the database
         :return:
         """
-        if DEBUG:
+        if self.debug:
             print '\n[!] Fetching network adapters'
         table = 'cmdb_ci_network_adapter'
-        #URL = self.base_url + table
-        #response = requests.get(URL, auth=(USERNAME, PASSWORD), headers=HEADERS)
-        #all_nics = response.json()['result']
         all_nics = self.fetch_data(table)
         if all_nics:
             for rec in all_nics:
-                #print json.dumps(rec, indent=4, sort_keys=True)
                 if 'value' in rec['cmdb_ci']:
                     dev_sys_id  = rec['cmdb_ci']['value']
                     nic_sys_id  = rec['sys_id']
@@ -749,11 +717,9 @@ class ServiceNow():
         Get IPs from SN and insert them into the database
         :return:
         """
-        if DEBUG:
+        if self.debug:
             print '\n[!] Fetching IP addresses'
         table = 'cmdb_ci_ip_address'
-        #URL = self.base_url + table
-        #response = requests.get(URL, auth=(USERNAME, PASSWORD), headers=HEADERS)
         all_ips = self.fetch_data(table)
         if all_ips:
             for rec in all_ips:
@@ -799,29 +765,3 @@ class ServiceNow():
                 self.rest.post_ip(ipdata)
             if macaddress:
                 self.rest.post_mac(macdata)
-
-
-
-if __name__ == '__main__':
-    snow = ServiceNow()
-    snow.create_db()
-    snow.get_relationships()
-    snow.get_manufacturers()
-    snow.get_hardware()
-    snow.get_locations()
-    snow.get_buildings()
-    snow.get_rooms()
-    if ZONE_AS_ROOM:
-        snow.get_zones()
-    snow.get_racks()
-    for table in DEVICES:
-        snow.get_computers(table)
-    snow.get_adapters()
-    snow.get_ips()
-    snow.upload_adapters()
-
-    sys.exit()
-
-
-
-
