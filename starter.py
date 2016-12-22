@@ -1,6 +1,8 @@
 #!/usr/bin/python
 
 """ README
+    This script is deprecated. Please use https://github.com/device42/servicenow_device42_mapping
+
     This script reads CIs from Servicenow and uploads them to Device42.
     It has 2 modes:
     1. Full migration  - when the TIMEFRAME is set to 0
